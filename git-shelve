@@ -1,0 +1,186 @@
+#!/bin/bash
+#
+# using: git shelve [-p] [-r remote] [-n name] [files...]
+
+get_shelve_remote() {
+	local branch_name
+	branch_name=$(git rev-parse --abbrev-ref HEAD)
+	git config --get "branch.${branch_name}.shelve-remote" || git config --get shelve.remote || echo origin
+}
+
+global_usage() {
+	echo "$0: usage:"
+	echo "  git-shelve ..."
+	echo "  git-unshelve ..."
+}
+
+unshelve_usage() {
+	echo "$0: usage:"
+	echo "  ${0##*/} [-r remote] name"
+}
+
+shelve_usage() {
+	echo "$0: usage:"
+	echo "  ${0##*/} [-r remote] [-n name] file [...]"
+	echo "  ${0##*/} [-r remote] -d (-a | name [...])"
+}
+
+check_shelve_remote() {
+	if [[ -z "$SHELVE_REMOTE" ]]; then
+		echo "ERROR: unable to determine shelve remote" >&2
+		exit 1
+	fi
+}
+
+shelve_delete() {
+	if [[ $shelf_all = 1 ]]; then
+		set -- $(git for-each-ref --format='%(refname)' refs/shelves/)
+	else
+		set -- "${@/#/refs\/shelves\/}"
+	fi
+
+	for ref in "$@"; do
+		git update-ref -d "$ref"
+		if [[ $shelf_push = 1 ]]; then
+			git push --delete "$SHELVE_REMOTE" "$ref"
+		fi
+	done
+}
+
+shelve_create() {
+	if [[ -z "$shelf_name" ]]; then
+		shelf_name="$(mktemp -u shelf-XXXXXX)}"
+	fi
+
+	GIT_INDEX_FILE=$(mktemp -u .git/shelfXXXXXX)
+	trap 'rm -f $GIT_INDEX_FILE' EXIT
+	export GIT_INDEX_FILE
+
+	git add "$@"
+	if [[ -z $(git ls-files -c) ]]; then
+		echo "ERROR: no files" >&2
+		exit 1
+	fi
+
+	tree=$(git write-tree)
+	commit=$(echo "Shelf $shelf_name" | git commit-tree "$tree")
+	git update-ref "refs/shelves/${shelf_name}" "$commit"
+
+	if [[ $shelf_push = 1 ]]; then
+		git push -f "$SHELVE_REMOTE" "refs/shelves/$shelf_name"
+	fi
+
+	echo "$shelf_name"
+}
+
+git_shelve() {
+	OPTIONS="$(getopt -o 'r:n:pda' --long 'remote:,name:,all,push,delete' -- "$@")"
+
+	if [[ $? -ne 0 ]]; then
+		shelve_usage >&2
+		exit 2
+	fi
+
+	eval set -- "$OPTIONS"
+	while :; do
+		case "$1" in
+			-n|--name)
+				shelf_name=$2
+				shift 2
+				;;
+
+			-r|--remote)
+				SHELVE_REMOTE=$2
+				shift 2
+				;;
+
+			-a|--all)
+				shelf_all=1
+				shift
+				;;
+
+			-d|--delete)
+				shelf_mode=delete
+				shift
+				;;
+
+			-p|--push)
+				shelf_push=1
+				shift
+				;;
+
+			--)	shift
+				break
+				;;
+
+			*)	echo "Abandon ship!" >&2
+				exit 1
+				;;
+		esac
+	done
+
+	check_shelve_remote
+
+	if [[ $shelf_mode = delete ]]; then
+		shelve_delete "$@"
+	else
+		shelve_create "$@"
+	fi
+}
+
+shelve_unshelf() {
+	if [[ $# -ne 1 ]]; then
+		unshelve_usage >&2
+		exit 2
+	fi
+	
+	git fetch "$SHELVE_REMOTE" "refs/shelves/$1:refs/shelves/$1"
+	echo "refs/shelves/$1"
+}
+
+git_unshelve() {
+	OPTIONS="$(getopt -o 'r:' --long 'remote:,name:,all,push,delete' -- "$@")"
+
+	if [[ $? -ne 0 ]]; then
+		unshelve_usage >&2
+		exit 2
+	fi
+
+	eval set -- "$OPTIONS"
+	while :; do
+		case "$1" in
+			-r|--remote)
+				SHELVE_REMOTE=$2
+				shift 2
+				;;
+
+			--)	shift
+				break
+				;;
+
+			*)	echo "Abandon ship!" >&2
+				exit 1
+				;;
+		esac
+	done
+
+	check_shelve_remote
+
+	shelve_unshelf "$@"
+}
+
+: "${SHELVE_REMOTE:=$(get_shelve_remote)}"
+
+set -e
+
+case $0 in
+	*-shelve)
+		git_shelve "$@"
+		;;
+	*-unshelve)
+		git_unshelve "$@"
+		;;
+	*)	global_usage >&2
+		exit 2
+		;;
+esac
